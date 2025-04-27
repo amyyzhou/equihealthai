@@ -1,112 +1,205 @@
 import streamlit as st
 import pandas as pd
+import openai
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report
 from sklearn.impute import SimpleImputer
 from imblearn.over_sampling import SMOTE
-from fairlearn.reductions import ExponentiatedGradient, DemographicParity
+from fairlearn.reductions import ExponentiatedGradient, DemographicParity, EqualizedOdds
 from fairlearn.postprocessing import ThresholdOptimizer
+from fairlearn.metrics import MetricFrame, demographic_parity_difference, equalized_odds_difference
+from sklearn.metrics import accuracy_score
 
-# 1. Upload Dataset
-st.title("FemHealth Bias Detector")
+
+# Set OpenAI API Key
+client = openai.OpenAI(api_key="REMOVED_API_KEY")
+
+def ask_gpt(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You are a medical AI fairness advisor."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2
+    )
+    return response.choices[0].message.content
+
+st.image("/Users/amyzhou/Downloads/Frame_10-removebg-preview.png", width=150)
+st.title("EquiHealth AI")
+st.write(
+    "A tool to help evaluate and mitigate bias in healthcare machine learning models by applying fairness techniques."
+)
+
 uploaded_file = st.file_uploader("Upload your healthcare dataset (CSV)", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     st.write("### Preview of Dataset", df.head())
 
-    # 2. User selects columns
     target_column = st.selectbox("Select the target outcome column", df.columns)
-    sensitive_column = st.selectbox("Select the sensitive (e.g., gender) column", df.columns)
-
+    sensitive_column = st.selectbox("Select the sensitive attribute (e.g., gender)", df.columns)
     feature_columns = st.multiselect("Select feature columns for training", df.columns.drop([target_column]))
 
-    # 3. Auto-suggest categorical columns
     suggested_categoricals = [col for col in feature_columns if df[col].dtype == 'object' or df[col].nunique() <= 10]
+    categorical_columns = st.multiselect("Categorical Columns (Auto-suggested):", feature_columns, default=suggested_categoricals)
 
-    categorical_columns = st.multiselect(
-        "Categorical Columns (Auto-suggested below, adjust if needed):",
-        feature_columns,
-        default=suggested_categoricals
-    )
-
-    # 4. Offer Binary Conversion if Target is Multi-class
-    binary_conversion = False
+    # Ensure binary target
     if df[target_column].nunique() > 2:
-        if st.checkbox(f"Convert '{target_column}' to binary classification (0 = No disease, 1 = Disease present)"):
-            df[target_column] = df[target_column].apply(lambda x: 0 if x == 0 else 1)
-            st.write("✅ Target column converted to binary.")
-            binary_conversion = True
+        df[target_column] = df[target_column].apply(lambda x: 0 if x == 0 else 1)
 
-    # 5. Auto-suggest resampling if imbalance detected
-    if sensitive_column in df.columns:
-        group_counts = df[sensitive_column].value_counts(normalize=True)
-        if group_counts.min() < 0.4:
-            st.warning("⚠️ Detected imbalance in the sensitive feature. SMOTE is recommended.")
-            apply_smote = st.checkbox("Apply SMOTE to balance the training set", value=True)
-        else:
-            apply_smote = False
-    else:
+    # Add this before SMOTE section:
+    run_baseline = st.checkbox("Run Without Fairness Techniques or SMOTE (Baseline Model)")
+
+    if run_baseline:
         apply_smote = False
+        apply_inprocessing = False
+        apply_postprocessing = False
+        train_separately = False
+    else:
 
-    # 6. In-processing and Post-processing options
-    apply_inprocessing = st.checkbox("Apply In-Processing Fairness Constraint (Fairlearn)")
-    apply_postprocessing = st.checkbox("Apply Post-Processing Threshold Optimization")
+        # SMOTE Logic
+        apply_smote = False
+        target_counts = df[target_column].value_counts(normalize=True)
+        minority_pct = target_counts.min()
 
-    if st.button("Run Bias Audit"):
-        # Prepare features and target
-        X = df[feature_columns]
-        y = df[target_column]
+        if minority_pct < 0.35:
+            st.warning(f"Class imbalance detected ({round(minority_pct*100,1)}%). SMOTE recommended.")
+            apply_smote = st.checkbox("Apply SMOTE", value=True)
+        elif minority_pct < 0.45:
+            st.info(f"Slight imbalance ({round(minority_pct*100,1)}%). SMOTE optional.")
+            apply_smote = st.checkbox("Apply SMOTE?", value=False)
+        else:
+            st.success(f"Classes well balanced ({round(minority_pct*100,1)}%). No SMOTE needed.")
 
-        # Validate target for fairness methods
-        if (apply_inprocessing or apply_postprocessing):
-            if y.nunique() > 2 or sorted(y.unique()) != [0, 1]:
-                st.error("❌ Fairness methods require binary classification with labels 0 and 1. Please convert your target variable.")
-                st.stop()
+        # Clinical Context & Fairness
+        # Initialize variables
+        apply_inprocessing = st.checkbox("Apply In-Processing Fairness (ExponentiatedGradient)")
 
-        # Apply One-Hot Encoding
-        X_encoded = pd.get_dummies(X, columns=categorical_columns, drop_first=True)
+        fairness_strategy = None
+        train_separately = False
+        apply_postprocessing = False
 
-        # Train-Test Split
-        X_train, X_test, y_train, y_test = train_test_split(X_encoded, y, test_size=0.3, random_state=42)
-
-        # Align columns
-        X_train, X_test = X_train.align(X_test, join='left', axis=1, fill_value=0)
-
-        # Apply Imputation
-        imputer = SimpleImputer(strategy='most_frequent')
-        X_train = pd.DataFrame(imputer.fit_transform(X_train), columns=X_train.columns)
-        X_test = pd.DataFrame(imputer.transform(X_test), columns=X_test.columns)
-
-        # Apply SMOTE (Pre-processing fairness)
-        if apply_smote:
-            smote = SMOTE(random_state=42)
-            X_train, y_train = smote.fit_resample(X_train, y_train)
-
-        # Apply In-processing (Fairlearn)
         if apply_inprocessing:
-            constraint = DemographicParity()
+            # Now ask about biological differences ONLY if In-Processing is selected
+            clinical_diff = st.radio("Are there known biological differences across genders?", ["Yes", "No", "Not Sure"])
+
+            if clinical_diff == "Yes":
+                st.info("Recommendation: Use Equalized Odds or train gender-specific models.")
+                fairness_choice = st.selectbox("Select Fairness Approach:", ["Equalized Odds", "Train Separate Models"])
+                if fairness_choice == "Train Separate Models":
+                    train_separately = True
+                else:
+                    fairness_strategy = EqualizedOdds()
+
+            elif clinical_diff == "No":
+                st.info("Defaulting to Demographic Parity.")
+                fairness_strategy = DemographicParity()
+
+            else:
+                st.info("Defaulting to Equalized Odds.")
+                fairness_strategy = EqualizedOdds()
+
+        # Post-Processing toggle (only if not training separately)
+        if not train_separately:
+            apply_postprocessing = st.checkbox("Apply Post-Processing Threshold Optimization")
+
+        # GPT Explanation Button
+        if st.button("Why this fairness recommendation?"):
+            if clinical_diff == "Yes" and apply_inprocessing:
+                selected_strategy = fairness_choice
+            else:
+                selected_strategy = fairness_strategy.__class__.__name__ if fairness_strategy else "No Fairness Applied"
+            
+            gpt_prompt = f"For {uploaded_file.name}, why is {selected_strategy} recommended given biological differences = {clinical_diff}?"
+            st.chat_message("assistant").write(ask_gpt(gpt_prompt))
+
+
+        # Run Bias Audit
+    if st.button("Run Bias Audit"):
+        imputer = SimpleImputer(strategy='most_frequent')  # Create ONE imputer instance
+
+        if train_separately:
+            genders = df[sensitive_column].unique()
+            for gender in genders:
+                df_gender = df[df[sensitive_column] == gender]
+                X = df_gender[feature_columns]
+                y = df_gender[target_column]
+                X = pd.get_dummies(X, columns=categorical_columns, drop_first=True)
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+                # Use single imputer instance
+                X_train = imputer.fit_transform(X_train)
+                X_test = imputer.transform(X_test)
+
+                if apply_smote:
+                    X_train, y_train = SMOTE(random_state=42).fit_resample(X_train, y_train)
+
+                model = RandomForestClassifier(random_state=42).fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                st.text(f"Performance for {gender}:")
+                st.text(classification_report(y_test, y_pred))
+
+        else:
+            X = pd.get_dummies(df[feature_columns], columns=categorical_columns, drop_first=True)
+            y = df[target_column]
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+            # Use single imputer instance
+            X_train = imputer.fit_transform(X_train)
+            X_test = imputer.transform(X_test)
+
+            if apply_smote:
+                X_train, y_train = SMOTE(random_state=42).fit_resample(X_train, y_train)
+
             base_model = RandomForestClassifier(random_state=42)
-            model = ExponentiatedGradient(base_model, constraints=constraint)
-            model.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
-        else:
-            model = RandomForestClassifier(random_state=42)
-            model.fit(X_train, y_train)
+            if apply_inprocessing and fairness_strategy:
+                model = ExponentiatedGradient(base_model, constraints=fairness_strategy)
+                model.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
+            else:
+                model = base_model.fit(X_train, y_train)
 
-        # Apply Post-processing (Threshold Optimization)
-        if apply_postprocessing:
-            thresh_opt = ThresholdOptimizer(
-                estimator=model,
-                constraints="equalized_odds",
-                prefit=True,
-                predict_method='predict_proba'
+            if apply_postprocessing:
+                if hasattr(model, "predict_proba"):
+                    thresh_opt = ThresholdOptimizer(estimator=model, constraints="equalized_odds", prefit=True, predict_method='predict_proba')
+                    thresh_opt.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
+                    y_pred = thresh_opt.predict(X_test, sensitive_features=df.loc[y_test.index, sensitive_column])
+                else:
+                    st.error("Post-Processing requires a model that supports probability predictions. Cannot apply ThresholdOptimizer after In-Processing with this setup.")
+                    y_pred = model.predict(X_test)
+            else:
+                y_pred = model.predict(X_test)
+
+            st.text("Model Performance:")
+            st.text(classification_report(y_test, y_pred))
+
+            # Assuming sensitive_column holds gender info
+            sensitive_features_test = df.loc[y_test.index, sensitive_column]
+
+            # Use MetricFrame to disaggregate performance
+            metric_frame = MetricFrame(
+                metrics={"accuracy": accuracy_score},
+                y_true=y_test,
+                y_pred=y_pred,
+                sensitive_features=sensitive_features_test
             )
-            thresh_opt.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
-            y_pred = thresh_opt.predict(X_test, sensitive_features=df.loc[y_test.index, sensitive_column])
-        else:
-            y_pred = model.predict(X_test)
 
-        # Evaluate Model
-        st.text("Model Performance on Test Set:")
-        st.text(classification_report(y_test, y_pred))
+            # Calculate fairness metrics
+            dp_diff = demographic_parity_difference(y_test, y_pred, sensitive_features=sensitive_features_test)
+            eo_diff = equalized_odds_difference(y_test, y_pred, sensitive_features=sensitive_features_test)
+
+            # Display in Streamlit
+            st.write("### Fairness Metrics:")
+            st.write(f"Demographic Parity Difference: `{dp_diff:.3f}`")
+            st.write(f"Equalized Odds Difference: `{eo_diff:.3f}`")
+
+            # Optional: Show accuracy per group
+            st.write("### Accuracy by Group:")
+            st.dataframe(metric_frame.by_group)
+
+    # --- AI Question Section ---
+    if st.button("Ask AI About Results"):
+        result_question = st.text_input("Enter your question about model fairness or performance:")
+        if result_question:
+            st.chat_message("assistant").write(ask_gpt(f"User question: {result_question}"))
