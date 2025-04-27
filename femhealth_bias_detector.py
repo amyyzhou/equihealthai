@@ -13,7 +13,8 @@ from sklearn.metrics import accuracy_score
 
 
 # Set OpenAI API Key
-client = openai.OpenAI(api_key="REMOVED_API_KEY")
+
+client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 def ask_gpt(prompt):
     response = client.chat.completions.create(
