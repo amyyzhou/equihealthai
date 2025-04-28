@@ -27,7 +27,7 @@ def ask_gpt(prompt):
     )
     return response.choices[0].message.content
 
-st.image("Frame_10-removebg-preview.png")
+st.image("assets/Frame_10-removebg-preview.png")
 st.title("EquiHealth AI")
 st.write(
     "A tool to help evaluate and mitigate bias in healthcare machine learning models by applying fairness techniques."
