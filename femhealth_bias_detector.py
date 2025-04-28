@@ -137,7 +137,9 @@ if uploaded_file is not None:
                 model = ExponentiatedGradient(base_model, constraints=fairness_strategy)
                 model.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
             else:
-                model = base_model.fit(X_train, y_train)
+                X_train = pd.DataFrame(X_train).astype(float)
+                y_train = pd.Series(y_train).astype(int)                
+                model = base_model.fit(X_train, y_train)model = base_model.fit(X_train, y_train)
 
             if apply_postprocessing:
                 if hasattr(model, "predict_proba"):
