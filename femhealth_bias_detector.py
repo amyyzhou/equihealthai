@@ -15,10 +15,10 @@ import os
 
 # Set OpenAI API Key
 
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def ask_gpt(prompt):
-    response = client.chat.completions.create(
+    response = openai.chat.completions.create(
         model="gpt-4",
         messages=[
             {"role": "system", "content": "You are a medical AI fairness advisor."},
