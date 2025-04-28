@@ -1,6 +1,6 @@
+openai==1.14.3
 streamlit==1.32.2
 pandas==2.2.2
 scikit-learn==1.2.2
 imbalanced-learn==0.10.1
 fairlearn==0.10.0
-openai==1.14.3
