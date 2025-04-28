@@ -10,11 +10,12 @@ from fairlearn.reductions import ExponentiatedGradient, DemographicParity, Equal
 from fairlearn.postprocessing import ThresholdOptimizer
 from fairlearn.metrics import MetricFrame, demographic_parity_difference, equalized_odds_difference
 from sklearn.metrics import accuracy_score
+import os
 
 
 # Set OpenAI API Key
 
-client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def ask_gpt(prompt):
     response = client.chat.completions.create(
