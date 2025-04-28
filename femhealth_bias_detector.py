@@ -137,8 +137,13 @@ if uploaded_file is not None:
                 model = ExponentiatedGradient(base_model, constraints=fairness_strategy)
                 model.fit(X_train, y_train, sensitive_features=df.loc[y_train.index, sensitive_column])
             else:
-                X_train = pd.DataFrame(X_train).astype(float)
+                # Ensure X_train is a DataFrame and all columns are numeric
+                X_train = pd.DataFrame(X_train)
+                X_train = X_train.apply(pd.to_numeric, errors='coerce')
+            
+                # Ensure y_train is numeric integers
                 y_train = pd.Series(y_train).astype(int)
+            
                 model = base_model.fit(X_train, y_train)
 
             if apply_postprocessing:
